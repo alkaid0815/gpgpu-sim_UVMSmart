@@ -2679,12 +2679,22 @@ void gmmu_t::sort_valid_pages()
 
 unsigned long long gmmu_t::get_ready_cycle(unsigned num_pages)
 {
+    return gpu_tot_sim_cycle + gpu_sim_cycle;
+}
+
+unsigned long long gmmu_t::get_ready_cycle_legacy(unsigned num_pages)
+{
     float speed = 2.0 * m_config.curve_a / M_PI * atan(m_config.curve_b * ((float)(num_pages * m_config.page_size) / 1024.0));
 
     return gpu_tot_sim_cycle + gpu_sim_cycle + (unsigned long long)((float)(m_config.page_size * num_pages) * m_config.core_freq / speed / (1024.0 * 1024.0 * 1024.0));
 }
 
 unsigned long long gmmu_t::get_ready_cycle_dma(unsigned size)
+{
+    return gpu_tot_sim_cycle + gpu_sim_cycle;
+}
+
+unsigned long long gmmu_t::get_ready_cycle_dma_legacy(unsigned size)
 {
     float speed = 2.0 * m_config.curve_a / M_PI * atan(m_config.curve_b * ((float)(size) / 1024.0));
     return gpu_tot_sim_cycle + gpu_sim_cycle + 200;
@@ -3711,7 +3721,7 @@ void gmmu_t::cycle()
         }
         else if (pcie_read_latency_queue->type == latency_type::PAGE_FAULT)
         { // processed far-fault is returned to upward queue
-
+            assert(false && "Unexpected case encountered!");
             if (sim_prof_enable)
             {
                 for (std::list<event_stats *>::iterator iter = fault_stats.begin(); iter != fault_stats.end(); iter++)
@@ -3782,7 +3792,7 @@ void gmmu_t::cycle()
         }
         else if (pcie_read_latency_queue->type == latency_type::PAGE_FAULT)
         { // schedule far-fault for transfer
-
+            assert(false && "Unexpected case encountered!");
             pcie_read_latency_queue->ready_cycle = gpu_tot_sim_cycle + gpu_sim_cycle + m_config.page_fault_latency * pcie_read_latency_queue->page_list.size();
 
             if (sim_prof_enable)

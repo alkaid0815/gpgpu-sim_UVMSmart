@@ -659,7 +659,9 @@ public:
 
    void initialize_large_page(mem_addr_t start_addr, size_t size);
 
+   unsigned long long get_ready_cycle_legacy(unsigned num_pages);
    unsigned long long get_ready_cycle(unsigned num_pages);
+   unsigned long long get_ready_cycle_dma_legacy(unsigned size);
    unsigned long long get_ready_cycle_dma(unsigned size);
 
    float get_pcie_utilization(unsigned num_pages);
