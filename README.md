@@ -49,11 +49,14 @@ Simple hassle-free. No need to worry about dependencies. Use the Dockerfile in t
 
 ```r
 sudo docker build -t gpgpu_uvmsmart:latest .
-sudo docker run --name <container_name> -it gpgpu_uvmsmart:latest
-cd /root/gpgpu-sim_UVMSmart/benchmarks/Managed/<benchmark_folder>
-vim gpgpusim.config
-./run > <output_file>
-sudo docker cp <container_name>:/root/gpgpu-sim_UVMSmart/benchmarks/Managed/<benchmark_folder>/<output_file> .
+sudo docker run --name gpgpu_uvmsmart_dev -it -v $(pwd):/root/gpgpu-sim_UVMSmart gpgpu_uvmsmart:latest
+cd /root/gpgpu-sim_UVMSmart
+source setup_environment
+make -j20
+cd benchmarks
+./setup_config.sh GeForceGTX1080Ti
+make
+find . -name 'run' | xargs chmod +x
 ```
 
 ## How to configure?

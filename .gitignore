@@ -1,0 +1,7 @@
+build
+lib
+benchmarks/Managed
+benchmarks/Results
+benchmarks/Unmanaged
+note
+.vscode
