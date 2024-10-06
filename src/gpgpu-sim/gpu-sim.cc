@@ -2075,7 +2075,7 @@ gpgpu_new_stats::~gpgpu_new_stats()
 }
 
 gmmu_t::gmmu_t(class gpgpu_sim *gpu, const gpgpu_sim_config &config, class gpgpu_new_stats *new_stats)
-    : m_gpu(gpu), m_config(config), m_new_stats(new_stats)
+    : m_gpu(gpu), m_config(config), m_new_stats(new_stats), page_table_walk_manager(this)
 {
     m_shader_config = &m_config.m_shader_config;
 
@@ -3826,12 +3826,15 @@ void gmmu_t::cycle()
 
     std::map<mem_addr_t, std::list<mem_fetch *>> page_fault_this_turn;
 
+    page_table_walk_manager.Cycle(gpu_sim_cycle + gpu_tot_sim_cycle);
     // check the page_table_walk_delay_queue
-    while (!page_table_walk_queue.empty() &&
-           ((gpu_sim_cycle + gpu_tot_sim_cycle) >= page_table_walk_queue.front().ready_cycle))
+    // while (!page_table_walk_queue.empty() &&
+    //        ((gpu_sim_cycle + gpu_tot_sim_cycle) >= page_table_walk_queue.front().ready_cycle))
+    for (PageTableWalker *walker: page_table_walk_manager.PopFinishedWalkers())
     {
 
-        mem_fetch *mf = page_table_walk_queue.front().mf;
+        // mem_fetch *mf = page_table_walk_queue.front().mf;
+        mem_fetch *mf = walker->GetMenFetch();
 
         list<mem_addr_t> page_list = m_gpu->get_global_memory()->get_faulty_pages(mf->get_addr(), mf->get_access_size());
 
@@ -3914,7 +3917,7 @@ void gmmu_t::cycle()
             }
         }
 
-        page_table_walk_queue.pop_front();
+        // page_table_walk_queue.pop_front();
     }
 
     // call hardware prefetcher based on the current page faults
@@ -3929,11 +3932,12 @@ void gmmu_t::cycle()
 
             mem_fetch *mf = (m_gpu->getSIMTCluster(i))->front_cu_gmmu_queue();
 
-            struct page_table_walk_latency_t pt_t;
-            pt_t.mf = mf;
-            pt_t.ready_cycle = gpu_sim_cycle + gpu_tot_sim_cycle + m_config.page_table_walk_latency;
+            // struct page_table_walk_latency_t pt_t;
+            // pt_t.mf = mf;
+            // pt_t.ready_cycle = gpu_sim_cycle + gpu_tot_sim_cycle + m_config.page_table_walk_latency;
 
-            page_table_walk_queue.push_back(pt_t);
+            // page_table_walk_queue.push_back(pt_t);
+            page_table_walk_manager.StartWalk(mf, gpu_sim_cycle + gpu_tot_sim_cycle);
 
             (m_gpu->getSIMTCluster(i))->pop_cu_gmmu_queue();
         }

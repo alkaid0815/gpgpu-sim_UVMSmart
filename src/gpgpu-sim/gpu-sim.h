@@ -34,6 +34,7 @@
 #include "../cuda-sim/memory.h"
 #include "addrdec.h"
 #include "shader.h"
+#include "page_table_walker.h"
 #include <iostream>
 #include <fstream>
 #include <list>
@@ -704,7 +705,10 @@ private:
    };
 
    //page table walk delay queue
-   std::list<page_table_walk_latency_t> page_table_walk_queue;  
+   // std::list<page_table_walk_latency_t> page_table_walk_queue;
+
+   
+   PageWalkerManager page_table_walk_manager;
 
    enum class latency_type { PCIE_READ, PCIE_WRITE_BACK, INVALIDATE, PAGE_FAULT, DMA };
 
