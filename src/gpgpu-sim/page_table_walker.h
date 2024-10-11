@@ -2,169 +2,337 @@
 #define PAGE_TABLE_WALKER_H
 
 #include <unordered_set>
-// #include <unordered_map>
+#include <unordered_map>
 #include <vector>
 #include "mem_fetch.h"
 
 using ULL = unsigned long long;
-constexpr ULL walker_cache_latency = 0;
-constexpr ULL walker_cache_to_dram_latency = 0;
+constexpr ULL walker_cache_latency = 20;
+constexpr ULL walker_cache_to_dram_latency = 100;
+constexpr ULL pwc_entries = 16;
 // constexpr ULL walker_dram_latency = walker_cache_latency + walker_cache_to_dram_latency;
 
 class gmmu_t;
 class memory_space;
 
-class PageTable
+enum class WalkerState
 {
-public:
-    PageTable(gmmu_t *gmmu) : gmmu_(gmmu), ptes() {}
-private:
-    std::unordered_map<ULL, memory_space*> ptes;
-    gmmu_t *gmmu_;
+    Finish,
+    LongPML4,
+    LongPDP,
+    LongPD,
+    LongPTE,
+    PD,
+    PTE
 };
 
-class PageTableWalker
+class MemFetchWrapper
 {
 public:
-    enum class State
-    {
-        Ready,
-        Finish,
-        LongPML4,
-        LongPDP,
-        LongPD,
-        LongPTE,
-        PD,
-        PTE
-    };
-
-    PageTableWalker(gmmu_t *gmmu, mem_fetch *mf) : gmmu_(gmmu), mf_(mf), state_(State::Ready) {}
-
-    virtual void Cycle(ULL current_cycle) = 0;
-    virtual void WalkStep() {
-        switch (state_)
-        {
-        case State::Ready:
-            /* code */
-            break;
-        case State::LongPML4:
-            /* code */
-            break;
-        case State::LongPDP:
-            /* code */
-            break;
-        case State::LongPD:
-            /* code */
-            break;
-        case State::LongPTE:
-            /* code */
-            break;
-        case State::PD:
-            /* code */
-            break;
-        case State::PTE:
-            /* code */
-            break;
-        default:
-            assert(false);
-            break;
-        }
-    };
-
-    State GetState()
-    {
-        return state_;
-    }
+    MemFetchWrapper(mem_fetch *mf, ULL pages) : mf_(mf), pending_pages_(pages) {}
 
     mem_fetch *GetMenFetch()
     {
         return mf_;
     }
 
+    void DecrementPendingPages()
+    {
+        if (pending_pages_ > 0)
+        {
+            --pending_pages_;
+        }
+    }
+
+    bool IsFinished()
+    {
+        return pending_pages_ == 0;
+    }
+
 private:
-    State state_;
     mem_fetch *mf_;
-    gmmu_t *gmmu_;
+    ULL pending_pages_;
 };
 
-class LatencyPageTableWalker : public PageTableWalker
+template <bool is64Bit>
+class PageTableWalker
 {
 public:
-    LatencyPageTableWalker(gmmu_t *gmmu, mem_fetch *mf, ULL initial_cycle)
-        : PageTableWalker(gmmu, mf), cycle_(initial_cycle), cache_pending_(true) {}
+    PageTableWalker(gmmu_t *gmmu, MemFetchWrapper *mf, ULL vpn) : gmmu_(gmmu), mf_(mf), state_(is64Bit ? WalkerState::LongPML4 : WalkerState::PD), vpn_(vpn) {}
 
+    virtual void Cycle(ULL current_cycle) = 0;
+    void WalkStep();
+
+    State GetState()
+    {
+        return state_;
+    }
+
+    ULL GetVPN() {
+        return vpn_;
+    }
+
+    MemFetchWrapper *GetMenFetchWrapper()
+    {
+        return mf_;
+    }
+
+private:
+    State state_;
+    MemFetchWrapper *mf_;
+    gmmu_t *gmmu_;
+    ULL vpn_;
+};
+
+template <>
+void PageTableWalker<true>::WalkStep()
+{
+    switch (state_)
+    {
+    case WalkerState::LongPML4:
+        state_ = WalkerState::LongPDP;
+        break;
+    case WalkerState::LongPDP:
+        state_ = WalkerState::LongPD;
+        break;
+    case WalkerState::LongPD:
+        state_ = WalkerState::LongPTE;
+        break;
+    case WalkerState::LongPTE:
+        state_ = WalkerState::Finish;
+        GetMenFetchWrapper()->DecrementPendingPages();
+        break;
+    default:
+        assert(false);
+        break;
+    }
+}
+
+template <>
+void PageTableWalker<false>::WalkStep()
+{
+    switch (state_)
+    {
+    case WalkerState::PD:
+        state_ = WalkerState::PTE;
+        break;
+    case WalkerState::PTE:
+        state_ = WalkerState::Finish;
+        GetMenFetchWrapper()->DecrementPendingPages();
+        break;
+    default:
+        assert(false);
+        break;
+    }
+}
+
+template <bool is64Bit>
+class LatencyPageTableWalker : public PageTableWalker<is64Bit>
+{
+private:
+    class Cache
+    {
+    public:
+        Cache(int capacity) : capacity_(capacity), dummy_(new Node)
+        {
+            this->dummy_->prev = this->dummy_->next = this->dummy_;
+        }
+
+        bool Has(ULL addr)
+        {
+            if (!m_.count(addr))
+                return false;
+            remove(m_[addr]);
+            Node *node = new Node(addr);
+            insert(dummy_->prev, node);
+            m_[addr] = node;
+            return true;
+        }
+
+        void Put(ULL addr)
+        {
+            Node *node = new Node(addr);
+            insert(dummy_->prev, node);
+            m_[addr] = node;
+            if (m_.size() > capacity_)
+                remove(dummy_->next);
+        }
+
+    private:
+        struct Node
+        {
+            Node *next;
+            Node *prev;
+            ULL key;
+            Node() = default;
+            Node(ULL key)
+            {
+                this->key = key;
+            }
+        };
+
+        void remove(Node *node)
+        {
+            node->prev->next = node->next;
+            node->next->prev = node->prev;
+            m_.erase(node->key);
+            delete node;
+        }
+
+        void insert(Node *prev, Node *node)
+        {
+            node->prev = prev;
+            node->next = prev->next;
+            prev->next = node;
+            node->next->prev = node;
+        }
+
+        std::unordered_map<ULL, Node *> m_;
+        ULL capacity_;
+        Node *dummy_;
+    };
+
+public:
+    LatencyPageTableWalker(gmmu_t *gmmu, MemFetchWrapper *mf, ULL vpn, ULL initial_cycle)
+        : PageTableWalker(gmmu, mf, vpn), cycle_(initial_cycle), cache_pending_(true) {}
 
     void Cycle(ULL current_cycle) override
     {
         ULL delta = current_cycle - cycle_;
-        if (cache_pending_) {
-            if (delta < walker_cache_latency) return;
+        if (cache_pending_)
+        {
+            if (delta < walker_cache_latency)
+                return;
+            bool hit = LatencyPageTableWalker::GetCache().Has(GetMappedIndex());
+            if (hit)
+            {
+                this->WalkStep();
+            }
 
-            bool hit = checkCache();
-            if (hit) this->WalkStep();
             // if cache hit, prepare next walk step, reset cache_pending_ to true
             // if cache miss, set cache_pending_ to false
             cache_pending_ = hit;
-        } else {
-            if (delta < walker_cache_to_dram_latency) return;
-
+        }
+        else
+        {
+            if (delta < walker_cache_to_dram_latency) {
+                return
+            }
+            
+            LatencyPageTableWalker::GetCache().Put(GetMappedIndex());
             this->WalkStep();
             cache_pending_ = true;
         }
         cycle_ = current_cycle;
     }
 
-    bool checkCache() {
-        // TODO do check
-        return false;
-    }
-
-    static std::unordered_set<ULL>& GetCache() {
-        static std::unordered_set<ULL> cache;
+    ULL GetMappedIndex();
+    
+    static LatencyPageTableWalker::Cache &GetCache()
+    {
+        static LatencyPageTableWalker::Cache cache(pwc_entries);
         return cache;
     }
+
 private:
     bool cache_pending_;
     ULL cycle_;
 };
 
+
+template <>
+ULL LatencyPageTableWalker<true>::GetMappedIndex()
+{
+    switch (GetState())
+    {
+    case WalkerState::LongPML4:
+        return GetVPN() & (0b111111000ull << 27);
+    case WalkerState::LongPDP:
+        return GetVPN() & (0b111111000ull << 18);
+    case WalkerState::LongPD:
+        return GetVPN() & (0b111111000ull << 9);
+    case WalkerState::LongPTE:
+        return GetVPN() & (0b111111000ull);
+    default:
+        assert(false);
+        return 0;
+    }
+}
+
+template <>
+ULL LatencyPageTableWalker<false>::GetMappedIndex()
+{
+    switch (GetState())
+    {
+    case WalkerState::PD:
+        return GetVPN() & (0b1111110000ull << 10);
+    case WalkerState::PTE:
+        return GetVPN() & (0b1111110000ull);
+    default:
+        assert(false);
+        return 0;
+    }
+}
+
+// inline ULL get_block_offset(ULL addr)
+// {
+//     return addr >> 6;
+// }
+
+template <bool is64Bit>
 class PageWalkerManager
 {
 public:
+    using PageTableWalker_t = std::vector<PageTableWalker<is64Bit>>;
+
     PageWalkerManager(gmmu_t *gmmu) : gmmu_(gmmu) {}
 
     void Cycle(ULL current_cycle)
     {
-        for (PageTableWalker *walker : walkers_)
+        // sort(walkers_.begin(), walkers_.end(), [](const auto &lhs, const auto &rhs)
+        //      { return lhs.GetMappedIndex() < rhs.GetMappedIndex(); });
+
+        for (auto &walker : walkers_)
         {
-            walker->Cycle(current_cycle);
+            walker.Cycle(current_cycle);
         }
     }
 
-    void StartWalk(mem_fetch *mf, ULL current_cycle) {
-        walkers_.push_back(new LatencyPageTableWalker(gmmu_, mf, current_cycle));
+    void StartWalk(mem_fetch *mf, ULL current_cycle)
+    {
+        ULL start_page = gmmu_->get_global_memory()->get_page_num(mf->get_addr());
+        ULL end_page = gmmu_->get_global_memory()->get_page_num(mf->get_addr() + mf->get_access_size() - 1);
+        MemFetchWrapper *mf_wrapper = new MemFetchWrapper(mf, end_page - start_page + 1);
+        for (ULL vpn = start_page; vpn <= end_page; ++vpn)
+        {
+            walkers_.push_back(LatencyPageTableWalker<is64Bit>(gmmu_, mf_wrapper, vpn, current_cycle));
+        }
     }
 
-    std::vector<PageTableWalker *> PopFinishedWalkers()
+    std::vector<mem_fetch *> PopFinishedFetchs()
     {
-        std::vector<PageTableWalker *> finishedWalkers;
+        std::vector<mem_fetch *> fetchs;
         size_t i = 0;
         while (i < walkers_.size())
         {
-            if (walkers_[i]->GetState() == PageTableWalker::State::Finish)
+            if (walkers_[i].GetState() == WalkerState::Finish)
             {
                 std::swap(walkers_[i], walkers_.back());
-                finishedWalkers.push_back(walkers_.back());
+                if (walkers_.back().GetMenFetchWrapper().IsFinished())
+                {
+                    fetchs.push_back(walkers_.back().GetMenFetchWrapper()->GetMenFetch());
+                    delete walkers_.back().GetMenFetchWrapper();
+                }
                 walkers_.pop_back();
             }
             else
                 ++i;
         }
-        return finishedWalkers;
+        return fetchs;
     }
 
 private:
-    std::vector<PageTableWalker *> walkers_;
+    PageTableWalker_t walkers_;
     gmmu_t *gmmu_;
 };
 

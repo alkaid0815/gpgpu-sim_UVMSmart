@@ -708,7 +708,7 @@ private:
    // std::list<page_table_walk_latency_t> page_table_walk_queue;
 
    
-   PageWalkerManager page_table_walk_manager;
+   PageWalkerManager<false> page_table_walk_manager;
 
    enum class latency_type { PCIE_READ, PCIE_WRITE_BACK, INVALIDATE, PAGE_FAULT, DMA };
 

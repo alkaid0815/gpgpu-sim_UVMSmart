@@ -3830,11 +3830,10 @@ void gmmu_t::cycle()
     // check the page_table_walk_delay_queue
     // while (!page_table_walk_queue.empty() &&
     //        ((gpu_sim_cycle + gpu_tot_sim_cycle) >= page_table_walk_queue.front().ready_cycle))
-    for (PageTableWalker *walker: page_table_walk_manager.PopFinishedWalkers())
+    for (mem_fetch* mf: page_table_walk_manager.PopFinishedFetchs())
     {
 
         // mem_fetch *mf = page_table_walk_queue.front().mf;
-        mem_fetch *mf = walker->GetMenFetch();
 
         list<mem_addr_t> page_list = m_gpu->get_global_memory()->get_faulty_pages(mf->get_addr(), mf->get_access_size());
 
