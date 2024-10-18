@@ -4,13 +4,21 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <vector>
+#include <ctime>
+#include <thread>
+#include <thread>
+#include <functional>
+#include <queue>
+#include <atomic>
+#include <mutex>
+#include <condition_variable>
 #include "mem_fetch.h"
 
 using ULL = unsigned long long;
 constexpr ULL walker_cache_latency = 20;
 constexpr ULL walker_cache_to_dram_latency = 100;
 constexpr ULL pwc_entries = 16;
-// constexpr ULL walker_dram_latency = walker_cache_latency + walker_cache_to_dram_latency;
+constexpr ULL walker_dram_latency = walker_cache_latency + walker_cache_to_dram_latency;
 
 class gmmu_t;
 class memory_space;
@@ -25,6 +33,23 @@ enum class WalkerState
     PD,
     PTE
 };
+
+#define CASE_STR(x) case WalkerState::x : return #x; break; 
+
+std::string to_string(WalkerState state) {
+    switch (state)
+    {
+    CASE_STR(LongPML4);
+    CASE_STR(LongPDP);
+    CASE_STR(LongPD);
+    CASE_STR(LongPTE);
+    CASE_STR(PD);
+    CASE_STR(PTE);
+    default:
+        break;
+    }
+    return "UNKNOWN_EVENT!";
+}
 
 class MemFetchWrapper
 {
@@ -61,11 +86,19 @@ public:
     PageTableWalker(gmmu_t *gmmu, MemFetchWrapper *mf, ULL vpn) : gmmu_(gmmu), mf_(mf), state_(is64Bit ? WalkerState::LongPML4 : WalkerState::PD), vpn_(vpn) {}
 
     virtual void Cycle(ULL current_cycle) = 0;
+    virtual ~PageTableWalker() {
+
+    }
     void WalkStep();
 
-    State GetState()
+    WalkerState GetState()
     {
         return state_;
+    }
+
+    bool IsFinished()
+    {
+        return GetState() == WalkerState::Finish;
     }
 
     ULL GetVPN() {
@@ -78,7 +111,7 @@ public:
     }
 
 private:
-    State state_;
+    WalkerState state_;
     MemFetchWrapper *mf_;
     gmmu_t *gmmu_;
     ULL vpn_;
@@ -194,19 +227,30 @@ private:
 
 public:
     LatencyPageTableWalker(gmmu_t *gmmu, MemFetchWrapper *mf, ULL vpn, ULL initial_cycle)
-        : PageTableWalker(gmmu, mf, vpn), cycle_(initial_cycle), cache_pending_(true) {}
+        : PageTableWalker(gmmu, mf, vpn), init_cycle_(initial_cycle), cycle_(initial_cycle), cache_pending_(true) {
+            Stats::GetInstance().Inc("count", 1);
+            logs_.push_back("vpn[" + vpn +  "] translation started at cycle " + initial_cycle + ":");
+        }
 
     void Cycle(ULL current_cycle) override
     {
+        if (IsFinished()) {
+            return
+        }
+
         ULL delta = current_cycle - cycle_;
         if (cache_pending_)
         {
-            if (delta < walker_cache_latency)
+            if (delta < walker_cache_latency) {
                 return;
+            }
+                
             bool hit = LatencyPageTableWalker::GetCache().Has(GetMappedIndex());
             if (hit)
             {
+                logs_.push_back(GetState() + "[" + GetMappedIndex() +  "]: cache hit, " + delta + " cycles");
                 this->WalkStep();
+                cycle_ = current_cycle;
             }
 
             // if cache hit, prepare next walk step, reset cache_pending_ to true
@@ -215,15 +259,27 @@ public:
         }
         else
         {
-            if (delta < walker_cache_to_dram_latency) {
-                return
+            if (delta < walker_dram_latency) {
+                return;
             }
             
             LatencyPageTableWalker::GetCache().Put(GetMappedIndex());
+            logs_.push_back(GetState() + "[" + GetMappedIndex() +  "]: cache miss, " + delta + " cycles")
             this->WalkStep();
             cache_pending_ = true;
+            cycle_ = current_cycle;
         }
-        cycle_ = current_cycle;
+    }
+
+    ~LatencyPageTableWalker() override {
+        Stats::GetInstance().Inc("cycle", cycle_ - init_cycle_);
+        logs_.push_back("vpn[" + vpn +  "] translation finished at cycle " + cycle_ + ".");
+
+
+        std::cout << "-----------------------------" << endl;
+        for (auto &log: logs_) {
+            std::cout << log << endl;
+        }
     }
 
     ULL GetMappedIndex();
@@ -237,6 +293,8 @@ public:
 private:
     bool cache_pending_;
     ULL cycle_;
+    ULL init_cycle_;
+    std::vector<std::string> logs_;
 };
 
 
@@ -285,13 +343,22 @@ class PageWalkerManager
 public:
     using PageTableWalker_t = std::vector<PageTableWalker<is64Bit>>;
 
-    PageWalkerManager(gmmu_t *gmmu) : gmmu_(gmmu) {}
+    PageWalkerManager(gmmu_t *gmmu) : gmmu_(gmmu) {        
+    }
+
+    ~PageWalkerManager() {
+        std::cout << "-----------------------------" << endl;
+        std::cout << "PW access count: " << Stats::GetInstance().Get("count") << endl;
+        std::cout << "PW total cycles: " << Stats::GetInstance().Get("cycle") << endl;
+        std::cout << "Avg PW cycles: " << (Stats::GetInstance().Get("cycle") / Stats::GetInstance().Get("count")) << endl;
+        std::cout << "PTE access count: " << Stats::GetInstance().Get("pte_access_count") << endl;
+        std::cout << "PTE access cache hit count: " << Stats::GetInstance().Get("pte_access_cache_hit_count") << endl;
+        std::cout << "PTE access cache hit rate: " << (static_cast<double>(Stats::GetInstance().Get("pte_access_cache_hit_count")) / Stats::GetInstance().Get("pte_access_count"))<< endl;
+        std::cout << "-----------------------------" << endl;
+    }
 
     void Cycle(ULL current_cycle)
     {
-        // sort(walkers_.begin(), walkers_.end(), [](const auto &lhs, const auto &rhs)
-        //      { return lhs.GetMappedIndex() < rhs.GetMappedIndex(); });
-
         for (auto &walker : walkers_)
         {
             walker.Cycle(current_cycle);
@@ -334,6 +401,26 @@ public:
 private:
     PageTableWalker_t walkers_;
     gmmu_t *gmmu_;
+};
+
+class Stats {
+public:
+    static Stats& GetInstance() {
+        static Stats instance;
+        return instance;
+    }
+
+    void Inc(const std::string &key, ULL val) {
+        entries_[key] += val;
+    }
+
+    ULL Get(const std::string &key) {
+        return entries_[key];
+    }
+
+private:
+    Stats() {}
+    std::unordered_map<std::string, ULL> entries_;
 };
 
 #endif
